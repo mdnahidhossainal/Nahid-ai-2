@@ -1,4 +1,4 @@
-name: Build persistent Qwen Judge SO
+name: Stage 6M persistent Qwen judge native build
 
 on:
   push:
@@ -15,77 +15,68 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build git zip
+          sudo apt-get install -y cmake ninja-build git build-essential
 
       - name: Install Android NDK
-        uses: android-actions/setup-android@v3
-      - name: Install NDK package
-        run: sdkmanager --install "ndk;27.2.12479018"
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: false
 
       - name: Clone llama.cpp
         run: |
-          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          rm -rf llama.cpp
+          git clone --depth 1 https://github.com/ggerganov/llama.cpp.git llama.cpp
 
-      - name: Configure llama.cpp shared library only
+      - name: Configure llama.cpp minimal Android shared libs
         run: |
           cmake -S llama.cpp -B llama-build -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_PLATFORM=android-26 \
+            -DANDROID_STL=c++_shared \
             -DBUILD_SHARED_LIBS=ON \
             -DGGML_NATIVE=OFF \
             -DGGML_OPENMP=OFF \
-            -DGGML_LLAMAFILE=OFF \
-            -DGGML_CPU=ON \
+            -DGGML_BLAS=OFF \
+            -DGGML_CUDA=OFF \
+            -DGGML_METAL=OFF \
+            -DGGML_VULKAN=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF \
-            -DLLAMA_CURL=OFF \
-            -DLLAMA_HTTPLIB=OFF
+            -DLLAMA_BUILD_TOOLS=OFF
 
-      - name: Build only required llama.cpp libraries
+      - name: Build only required llama shared libraries
         run: |
-          cmake --build llama-build --config Release --target llama -j2
-
-      - name: Locate llama.cpp shared libraries
-        run: |
-          echo "Searching built .so files..."
-          find llama-build -name "*.so" -type f -print
-          mkdir -p out/arm64-v8a
-          cp $(find llama-build -name "libllama.so" -type f | head -n 1) out/arm64-v8a/
-          cp $(find llama-build -name "libggml.so" -type f | head -n 1) out/arm64-v8a/
-          cp $(find llama-build -name "libggml-base.so" -type f | head -n 1) out/arm64-v8a/
-          cp $(find llama-build -name "libggml-cpu.so" -type f | head -n 1) out/arm64-v8a/
-          ls -lh out/arm64-v8a
+          cmake --build llama-build --target ggml ggml-base ggml-cpu llama -j2
 
       - name: Build libnahid_qwen_judge.so
         run: |
-          export NDK="$ANDROID_HOME/ndk/27.2.12479018"
-          export TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          export CXX="$TOOLCHAIN/bin/aarch64-linux-android24-clang++"
-          export SYSROOT="$TOOLCHAIN/sysroot"
-          export JNI_INCLUDE="$JAVA_HOME/include"
-          export JNI_INCLUDE_LINUX="$JAVA_HOME/include/linux"
-          test -f native/qwen_judge/nahid_qwen_judge.cpp
-          $CXX -shared -fPIC -O3 -std=c++17 \
-            -I"llama.cpp/include" \
-            -I"llama.cpp/ggml/include" \
-            -I"$JNI_INCLUDE" -I"$JNI_INCLUDE_LINUX" \
+          mkdir -p out/arm64-v8a
+          TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+          CXX="$TOOLCHAIN/bin/aarch64-linux-android26-clang++"
+          INCLUDES="-Illama.cpp/include -Illama.cpp/ggml/include -Illama.cpp/src -Illama.cpp/ggml/src"
+          LIBDIR="-L$(pwd)/llama-build/bin -L$(pwd)/llama-build/src -L$(pwd)/llama-build/ggml/src -L$(pwd)/llama-build/ggml/src/ggml-cpu -L$(pwd)/llama-build/ggml/src/ggml-base"
+          $CXX -shared -fPIC -O2 -std=c++17 \
+            $INCLUDES \
             native/qwen_judge/nahid_qwen_judge.cpp \
-            -L"$PWD/out/arm64-v8a" \
+            $LIBDIR \
             -Wl,-rpath,'$ORIGIN' \
             -lllama -lggml -lggml-base -lggml-cpu -llog -landroid \
             -o out/arm64-v8a/libnahid_qwen_judge.so
-          ls -lh out/arm64-v8a
 
-      - name: Package artifact
+      - name: Package shared libraries including libc++ runtime
         run: |
-          cd out
-          zip -r ../libnahid_qwen_judge_stage6M_persistent_arm64_v8a.zip arm64-v8a
-          cd ..
-          ls -lh libnahid_qwen_judge_stage6M_persistent_arm64_v8a.zip
+          mkdir -p out/arm64-v8a
+          find llama-build -name 'libggml.so' -exec cp -v {} out/arm64-v8a/ \;
+          find llama-build -name 'libggml-base.so' -exec cp -v {} out/arm64-v8a/ \;
+          find llama-build -name 'libggml-cpu.so' -exec cp -v {} out/arm64-v8a/ \;
+          find llama-build -name 'libllama.so' -exec cp -v {} out/arm64-v8a/ \;
+          # This is critical. The persistent judge .so depends on the Android C++ shared runtime.
+          cp -v "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" out/arm64-v8a/
+          ls -la out/arm64-v8a
+          (cd out && zip -r ../libnahid_qwen_judge_stage6M_persistent_arm64_v8a.zip arm64-v8a)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
