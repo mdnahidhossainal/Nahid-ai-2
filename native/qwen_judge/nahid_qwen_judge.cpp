@@ -286,6 +286,106 @@ static std::string score_route_locked(const std::string & prompt) {
     return log.str();
 }
 
+
+
+static float score_first_token_locked(const std::string & candidate) {
+    int tok = first_token_for_candidate_locked(candidate);
+    if (tok < 0) return -INFINITY;
+    const float * logits = llama_get_logits_ith(g_ctx, -1);
+    if (!logits) return -INFINITY;
+    return logits[tok];
+}
+
+static std::string score_yes_no_prompt_locked(const std::string & title, const std::string & prompt) {
+    std::ostringstream log;
+    log << title << "\n";
+    if (!g_model || !g_ctx || !g_vocab) {
+        log << "SESSION_NOT_READY ❌\n";
+        return log.str();
+    }
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+    auto toks = tokenize_locked(prompt, true, true);
+    log << "PROMPT_TOKENS_ORIGINAL=" << toks.size() << "\n";
+    if (toks.empty()) {
+        log << "TOKENIZE_FAILED ❌\n";
+        return log.str();
+    }
+    const int max_prompt_tokens = 896;
+    if ((int)toks.size() > max_prompt_tokens) {
+        log << "PROMPT_TRUNCATED_FOR_SAFE_DECODE_FROM=" << toks.size() << " TO=" << max_prompt_tokens << "\n";
+        toks.erase(toks.begin(), toks.end() - max_prompt_tokens);
+    }
+    log << "PROMPT_TOKENS_USED=" << toks.size() << "\n";
+    llama_batch batch = llama_batch_get_one(toks.data(), (int)toks.size());
+    int rc = llama_decode(g_ctx, batch);
+    log << "PROMPT_DECODE_RC=" << rc << "\n";
+    if (rc != 0) {
+        log << "PROMPT_DECODE_FAILED ❌\n";
+        return log.str();
+    }
+    float yes_score = std::max(score_first_token_locked(" YES"), score_first_token_locked(" yes"));
+    float no_score = std::max(score_first_token_locked(" NO"), score_first_token_locked(" no"));
+    log << "YES_SCORE=" << yes_score << "\n";
+    log << "NO_SCORE=" << no_score << "\n";
+    log << "WINNER=" << ((yes_score > no_score) ? "YES" : "NO") << "\n";
+    return log.str();
+}
+
+static std::string extract_winner_yes_no(const std::string & out) {
+    std::string key = "WINNER=";
+    size_t pos = out.find(key);
+    if (pos == std::string::npos) return "";
+    pos += key.size();
+    size_t end = out.find('\n', pos);
+    if (end == std::string::npos) end = out.size();
+    return out.substr(pos, end - pos);
+}
+
+static std::string semantic_route_locked(const std::string & user_text) {
+    std::ostringstream log;
+    log << "STAGE6M_S_NATIVE_SEMANTIC_ROUTE_SCORER\n";
+    if (!g_model || !g_ctx || !g_vocab) {
+        log << "SESSION_NOT_READY ❌\n";
+        return log.str();
+    }
+    std::string u = user_text;
+    std::replace(u.begin(), u.end(), '\n', ' ');
+
+    // Gate 1: semantic screen need. This is not a fixed keyword route. The model scores YES/NO
+    // for whether the CURRENT visible phone screen is needed to answer or act.
+    std::string screen_prompt =
+        "Does this request require looking at the CURRENT visible phone screen, UI, screenshot, visible app, button, icon, or text on the phone? Answer YES or NO.\n"
+        "Examples: 'বাংলাদেশ কোথায়' => NO. 'হাটহাজারী মাদ্রাসা কোথায়' => NO. 'স্ক্রিনে কি আছে' => YES. 'এই বাটন কোথায়' => YES.\n"
+        "User: " + u + "\nAnswer:";
+    std::string screen = score_yes_no_prompt_locked("SCREEN_SEMANTIC_GATE", screen_prompt);
+    log << screen;
+    std::string screen_winner = extract_winner_yes_no(screen);
+    log << "SCREEN_NEEDED=" << screen_winner << "\n";
+
+    if (screen_winner == "YES") {
+        log << "ROUTE=SCREEN_LOCATOR\n";
+        log << "STAGE6M_S_NATIVE_SEMANTIC_ROUTE_SCORER_OK ✅\n";
+        return log.str();
+    }
+
+    // Gate 2: sensitive action confirmation.
+    std::string sensitive_prompt =
+        "Is this request asking the assistant to perform a sensitive phone action such as call someone, send SMS/message, delete, pay, buy, transfer money, use password, or change private account settings? Answer YES or NO.\n"
+        "User: " + u + "\nAnswer:";
+    std::string sensitive = score_yes_no_prompt_locked("SENSITIVE_ACTION_GATE", sensitive_prompt);
+    log << sensitive;
+    std::string sensitive_winner = extract_winner_yes_no(sensitive);
+    log << "SENSITIVE_ACTION=" << sensitive_winner << "\n";
+
+    if (sensitive_winner == "YES") {
+        log << "ROUTE=NEED_CONFIRMATION\n";
+    } else {
+        log << "ROUTE=GEMINI_CONVERSATION\n";
+    }
+    log << "STAGE6M_S_NATIVE_SEMANTIC_ROUTE_SCORER_OK ✅\n";
+    return log.str();
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_initJudgeSession(
         JNIEnv * env, jclass, jstring modelPath) {
@@ -312,6 +412,14 @@ Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_scoreRoutePersistent
         JNIEnv * env, jclass, jstring prompt) {
     std::lock_guard<std::mutex> lock(g_mutex);
     return ret(env, score_route_locked(jstr(env, prompt)));
+}
+
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_semanticRoutePersistent(
+        JNIEnv * env, jclass, jstring userText) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return ret(env, semantic_route_locked(jstr(env, userText)));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
