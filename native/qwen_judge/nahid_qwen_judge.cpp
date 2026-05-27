@@ -214,6 +214,78 @@ static std::string generate_locked(const std::string & prompt, int max_tokens) {
     return log.str();
 }
 
+
+static int first_token_for_candidate_locked(const std::string & text) {
+    auto toks = tokenize_locked(text, false, true);
+    if (!toks.empty()) return (int)toks[0];
+    return -1;
+}
+
+static std::string score_route_locked(const std::string & prompt) {
+    std::ostringstream log;
+    log << "STAGE6M_NATIVE_ROUTE_SCORER\n";
+    if (!g_model || !g_ctx || !g_vocab) {
+        log << "SESSION_NOT_READY ❌\n";
+        return log.str();
+    }
+
+    // No free text generation here. The Judge only scores A/B/C next-token choices.
+    llama_memory_clear(llama_get_memory(g_ctx), true);
+
+    auto toks = tokenize_locked(prompt, true, true);
+    log << "PROMPT_TOKENS_ORIGINAL=" << toks.size() << "\n";
+    if (toks.empty()) {
+        log << "TOKENIZE_FAILED ❌\n";
+        return log.str();
+    }
+    const int max_prompt_tokens = 896;
+    if ((int)toks.size() > max_prompt_tokens) {
+        log << "PROMPT_TRUNCATED_FOR_SAFE_DECODE_FROM=" << toks.size() << " TO=" << max_prompt_tokens << "\n";
+        toks.erase(toks.begin(), toks.end() - max_prompt_tokens);
+    }
+    log << "PROMPT_TOKENS_USED=" << toks.size() << "\n";
+
+    llama_batch batch = llama_batch_get_one(toks.data(), (int)toks.size());
+    int rc = llama_decode(g_ctx, batch);
+    log << "PROMPT_DECODE_RC=" << rc << "\n";
+    if (rc != 0) {
+        log << "PROMPT_DECODE_FAILED ❌\n";
+        return log.str();
+    }
+
+    const float * logits = llama_get_logits_ith(g_ctx, -1);
+    if (!logits) {
+        log << "LOGITS_NULL ❌\n";
+        return log.str();
+    }
+
+    struct Cand { const char * letter; const char * route; const char * tokenText; int token; float score; };
+    Cand cands[3] = {
+        {"A", "GEMINI_CONVERSATION", " A", -1, -INFINITY},
+        {"B", "SCREEN_LOCATOR", " B", -1, -INFINITY},
+        {"C", "NEED_CONFIRMATION", " C", -1, -INFINITY}
+    };
+
+    for (auto & c : cands) {
+        c.token = first_token_for_candidate_locked(c.tokenText);
+        if (c.token < 0) c.token = first_token_for_candidate_locked(c.letter);
+        if (c.token >= 0) c.score = logits[c.token];
+        log << "CANDIDATE_" << c.letter << "_ROUTE=" << c.route << "\n";
+        log << "CANDIDATE_" << c.letter << "_TOKEN=" << c.token << "\n";
+        log << "CANDIDATE_" << c.letter << "_SCORE=" << c.score << "\n";
+    }
+
+    int best = 0;
+    for (int i = 1; i < 3; ++i) {
+        if (cands[i].score > cands[best].score) best = i;
+    }
+
+    log << "WINNER_LETTER=" << cands[best].letter << "\n";
+    log << "ROUTE=" << cands[best].route << "\n";
+    log << "STAGE6M_NATIVE_ROUTE_SCORER_OK ✅\n";
+    return log.str();
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_initJudgeSession(
         JNIEnv * env, jclass, jstring modelPath) {
@@ -233,6 +305,13 @@ Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_judgeRoutePersistent
         JNIEnv * env, jclass, jstring prompt, jint maxTokens) {
     std::lock_guard<std::mutex> lock(g_mutex);
     return ret(env, generate_locked(jstr(env, prompt), (int)maxTokens));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_nahidai_assistant_core_judge_QwenJudgeNativeBridge_scoreRoutePersistent(
+        JNIEnv * env, jclass, jstring prompt) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return ret(env, score_route_locked(jstr(env, prompt)));
 }
 
 extern "C" JNIEXPORT jstring JNICALL
