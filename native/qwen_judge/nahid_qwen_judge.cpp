@@ -93,8 +93,8 @@ static std::string init_session_locked(const std::string & model_path) {
     log << "MODEL_LOAD_OK ✅\n";
 
     llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = 512;
-    cparams.n_batch = 256;
+    cparams.n_ctx = 1024;
+    cparams.n_batch = 1024;
     cparams.n_threads = 4;
     cparams.n_threads_batch = 4;
 
@@ -161,11 +161,23 @@ static std::string generate_locked(const std::string & prompt, int max_tokens) {
 #endif
 
     auto toks = tokenize_locked(prompt, true, true);
-    log << "PROMPT_TOKENS=" << toks.size() << "\n";
+    log << "PROMPT_TOKENS_ORIGINAL=" << toks.size() << "\n";
     if (toks.empty()) {
         log << "TOKENIZE_FAILED ❌\n";
         return log.str();
     }
+
+    // Stage 6M-L fix:
+    // The previous persistent build used n_batch=256 and n_ctx=512.
+    // The real Judge prompt is often ~300-400 tokens. Passing a batch larger
+    // than n_batch can hang or take a very long time on Android. Keep the model
+    // loaded, but make the single prompt decode safe and bounded.
+    const int max_prompt_tokens = 896; // leaves room for generated route tokens inside n_ctx=1024
+    if ((int)toks.size() > max_prompt_tokens) {
+        log << "PROMPT_TRUNCATED_FOR_SAFE_DECODE_FROM=" << toks.size() << " TO=" << max_prompt_tokens << "\n";
+        toks.erase(toks.begin(), toks.end() - max_prompt_tokens);
+    }
+    log << "PROMPT_TOKENS_USED=" << toks.size() << "\n";
 
     llama_batch batch = llama_batch_get_one(toks.data(), (int)toks.size());
     int rc = llama_decode(g_ctx, batch);
