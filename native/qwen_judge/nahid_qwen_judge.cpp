@@ -223,13 +223,13 @@ static int first_token_for_candidate_locked(const std::string & text) {
 
 static std::string score_route_locked(const std::string & prompt) {
     std::ostringstream log;
-    log << "STAGE6M_NATIVE_ROUTE_SCORER\n";
+    log << "STAGE6M_Q_NATIVE_ROUTE_WORD_SCORER\n";
     if (!g_model || !g_ctx || !g_vocab) {
         log << "SESSION_NOT_READY ❌\n";
         return log.str();
     }
 
-    // No free text generation here. The Judge only scores A/B/C next-token choices.
+    // No free text generation here. The Judge scores route WORD choices: CHAT / SCREEN / CONFIRM.
     llama_memory_clear(llama_get_memory(g_ctx), true);
 
     auto toks = tokenize_locked(prompt, true, true);
@@ -259,20 +259,20 @@ static std::string score_route_locked(const std::string & prompt) {
         return log.str();
     }
 
-    struct Cand { const char * letter; const char * route; const char * tokenText; int token; float score; };
+    struct Cand { const char * word; const char * route; const char * tokenText1; const char * tokenText2; int token; float score; };
     Cand cands[3] = {
-        {"A", "GEMINI_CONVERSATION", " A", -1, -INFINITY},
-        {"B", "SCREEN_LOCATOR", " B", -1, -INFINITY},
-        {"C", "NEED_CONFIRMATION", " C", -1, -INFINITY}
+        {"CHAT", "GEMINI_CONVERSATION", " CHAT", " chat", -1, -INFINITY},
+        {"SCREEN", "SCREEN_LOCATOR", " SCREEN", " screen", -1, -INFINITY},
+        {"CONFIRM", "NEED_CONFIRMATION", " CONFIRM", " confirm", -1, -INFINITY}
     };
 
     for (auto & c : cands) {
-        c.token = first_token_for_candidate_locked(c.tokenText);
-        if (c.token < 0) c.token = first_token_for_candidate_locked(c.letter);
+        c.token = first_token_for_candidate_locked(c.tokenText1);
+        if (c.token < 0) c.token = first_token_for_candidate_locked(c.tokenText2);
         if (c.token >= 0) c.score = logits[c.token];
-        log << "CANDIDATE_" << c.letter << "_ROUTE=" << c.route << "\n";
-        log << "CANDIDATE_" << c.letter << "_TOKEN=" << c.token << "\n";
-        log << "CANDIDATE_" << c.letter << "_SCORE=" << c.score << "\n";
+        log << "CANDIDATE_" << c.word << "_ROUTE=" << c.route << "\n";
+        log << "CANDIDATE_" << c.word << "_TOKEN=" << c.token << "\n";
+        log << "CANDIDATE_" << c.word << "_SCORE=" << c.score << "\n";
     }
 
     int best = 0;
@@ -280,9 +280,9 @@ static std::string score_route_locked(const std::string & prompt) {
         if (cands[i].score > cands[best].score) best = i;
     }
 
-    log << "WINNER_LETTER=" << cands[best].letter << "\n";
+    log << "WINNER_WORD=" << cands[best].word << "\n";
     log << "ROUTE=" << cands[best].route << "\n";
-    log << "STAGE6M_NATIVE_ROUTE_SCORER_OK ✅\n";
+    log << "STAGE6M_Q_NATIVE_ROUTE_WORD_SCORER_OK ✅\n";
     return log.str();
 }
 
